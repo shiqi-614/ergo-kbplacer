@@ -2,46 +2,38 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from typing import List, Tuple
 
 import pcbnew
 import pytest
 
-from kbplacer.defaults import ZERO_POSITION
+from kbplacer.board_modifier import (
+    get_footprint,
+    get_orientation,
+    get_position,
+    get_side,
+    set_position,
+    set_rotation,
+    set_side,
+)
+from kbplacer.defaults import DEFAULT_DIODE_POSITION, ZERO_POSITION
+from kbplacer.element_position import ElementInfo, PositionOption, Side
+from kbplacer.key_placer import (
+    KeyboardSwitchIterator,
+    KeyMatrix,
+    KeyPlacer,
+)
+from kbplacer.kle_serial import get_keyboard
 
 from .conftest import (
     add_diode_footprint,
+    add_led_footprint,
     add_switch_footprint,
     equal_ignore_order,
     generate_render,
     update_netinfo,
 )
-
-try:
-    from kbplacer.board_modifier import (
-        get_footprint,
-        get_position,
-        set_position,
-        set_side,
-    )
-    from kbplacer.defaults import DEFAULT_DIODE_POSITION
-    from kbplacer.element_position import ElementInfo, PositionOption, Side
-    from kbplacer.key_placer import (
-        KeyboardSwitchIterator,
-        KeyMatrix,
-        KeyPlacer,
-    )
-    from kbplacer.kle_serial import get_keyboard
-except Exception:
-    # satisfy import issues when running examples tests
-    # in docker image on CI.
-    # these tests should not be executed but pytest
-    # would fail to collect test information without that:
-    from enum import Flag
-
-    class Side(Flag):
-        FRONT = False
-        BACK = True
 
 
 def get_board_with_one_switch(
@@ -49,9 +41,16 @@ def get_board_with_one_switch(
 ) -> Tuple[pcbnew.BOARD, pcbnew.FOOTPRINT, List[pcbnew.FOOTPRINT]]:
     board = pcbnew.CreateEmptyBoard()
     net_count = board.GetNetCount()
-    switch_diode_net = pcbnew.NETINFO_ITEM(board, "Net-(D-Pad2)", net_count)
-    update_netinfo(board, switch_diode_net)
-    board.Add(switch_diode_net)
+
+    def _add_net(name: str, netcode: int) -> pcbnew.NETINFO_ITEM:
+        net = pcbnew.NETINFO_ITEM(board, name, netcode)
+        update_netinfo(board, net)
+        board.Add(net)
+        return net
+
+    switch_diode_net = _add_net("Net-(D-Pad2)", net_count)
+    column_net = _add_net("COL1", net_count + 1)
+    row_net = _add_net("ROW1", net_count + 2)
 
     switch = add_switch_footprint(board, request, 1, footprint=footprint)
     for p in switch.Pads():
@@ -61,12 +60,9 @@ def get_board_with_one_switch(
     diodes = []
     for i in range(number_of_diodes):
         diode = add_diode_footprint(board, request, i + 1)
+        diode.FindPadByNumber("1").SetNet(row_net)
         diode.FindPadByNumber("2").SetNet(switch_diode_net)
         diodes.append(diode)
-
-    column_net = pcbnew.NETINFO_ITEM(board, "COL1", net_count + 1)
-    update_netinfo(board, column_net)
-    board.Add(column_net)
 
     for p in switch.Pads():
         if p.GetNumber() == "1":
@@ -227,6 +223,39 @@ def test_multi_diode_switch_routing(tmpdir, request) -> None:
     assert_board_tracks(expected, board)
 
 
+def test_diode_switch_routing_not_matching_nets(tmpdir, request, caplog) -> None:
+    board, switch, diodes = get_board_with_one_switch(request, "SW_Cherry_MX_PCB_1.00u")
+    key_placer = KeyPlacer(board)
+
+    assert len(diodes) == 1
+    diodes[0].FindPadByNumber("2").SetNet(None)
+    set_position(diodes[0], pcbnew.wxPointMM(0, 5))
+
+    with caplog.at_level(logging.ERROR):
+        key_placer.route_switch_with_diode(switch, diodes)
+    save_and_render(board, tmpdir, request)
+
+    assert "Could not find pads with the same net, routing skipped" in caplog.text
+    assert_board_tracks([], board)
+
+
+def test_multi_diode_illegal_position_setting(request) -> None:
+    board, _, _ = get_board_with_one_switch(
+        request, "SW_Cherry_MX_PCB_1.00u", number_of_diodes=2
+    )
+    key_placer = KeyPlacer(board)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"The 'Custom' position not supported for multiple diodes per switch",
+    ):
+        key_placer.run(
+            "",  # not important, should raise even when layout not provided
+            ElementInfo("SW{}", PositionOption.DEFAULT, ZERO_POSITION, ""),
+            ElementInfo("D{}", PositionOption.CUSTOM, ZERO_POSITION, ""),
+        )
+
+
 def get_2x2_layout_path(request) -> str:
     return f"{request.fspath.dirname}/../examples/2x2/kle-internal.json"
 
@@ -251,7 +280,7 @@ def add_2x2_nets(board):
     return board.GetNetInfo().NetsByName()
 
 
-def get_board_for_2x2_example(request):
+def get_board_for_2x2_example(request) -> pcbnew.BOARD:
     board = pcbnew.CreateEmptyBoard()
     netcodes_map = add_2x2_nets(board)
     for i in range(1, 5):
@@ -396,3 +425,91 @@ def test_switch_iterator_default_mode_ignore_decal(request) -> None:
     for key, footprint in iterator:
         assert key == next(expected_keys)
         assert footprint.GetReference() == next(expected_footprints)
+
+
+def test_placer_board_without_matching_switches(request) -> None:
+    board = get_board_for_2x2_example(request)
+    key_placer = KeyPlacer(board)
+    key_info = ElementInfo("MX{}", PositionOption.DEFAULT, ZERO_POSITION, "")
+    diode_info = ElementInfo("D{}", PositionOption.DEFAULT, DEFAULT_DIODE_POSITION, "")
+    layout_path = get_2x2_layout_path(request)
+
+    with pytest.raises(
+        RuntimeError, match=r"No switch footprints found using 'MX{}' annotation format"
+    ):
+        key_placer.run(layout_path, key_info, diode_info, True)
+
+
+def test_placing_additional_elements(tmpdir, request) -> None:
+    """Tests if placer correctly applies RELATIVE position
+    for each 'additional element'
+    """
+    board = get_board_for_2x2_example(request)
+    key_placer = KeyPlacer(board)
+    key_info = ElementInfo("SW{}", PositionOption.DEFAULT, ZERO_POSITION, "")
+    diode_info = ElementInfo("D{}", PositionOption.DEFAULT, DEFAULT_DIODE_POSITION, "")
+    additional_elements = [ElementInfo("LED{}", PositionOption.RELATIVE, None, "")]
+    layout_path = get_2x2_layout_path(request)
+
+    for i in range(1, 5):
+        led = add_led_footprint(board, request, i)
+        if i % 2 == 0:
+            set_side(led, Side.BACK)
+        set_rotation(led, 10 * (i - 1))
+
+    sw1 = get_footprint(board, "SW1")
+    led1 = get_footprint(board, "LED1")
+
+    position_offset = pcbnew.wxPointMM(0, 5)
+    set_position(led1, get_position(sw1) + position_offset)
+
+    key_placer.run(layout_path, key_info, diode_info, True, True, additional_elements)
+
+    save_and_render(board, tmpdir, request)
+
+    assert_2x2_layout_switches(board, (19.05, 19.05))
+
+    switches = [get_footprint(board, f"SW{i}") for i in range(1, 5)]
+    leds = [get_footprint(board, f"LED{i}") for i in range(1, 5)]
+    for switch, led in zip(switches, leds):
+        assert get_position(led) == get_position(switch) + position_offset
+        # because reference LED1 is on front side and rotated by 0 degrees:
+        assert get_side(led) == Side.FRONT
+        assert get_orientation(led) == 0
+
+
+def test_placer_diode_from_preset_missing_path(request) -> None:
+    board = get_board_for_2x2_example(request)
+    key_placer = KeyPlacer(board)
+    key_info = ElementInfo("SW{}", PositionOption.DEFAULT, ZERO_POSITION, "")
+    diode_info = ElementInfo("D{}", PositionOption.PRESET, None, "")
+    layout_path = get_2x2_layout_path(request)
+
+    with pytest.raises(ValueError, match=r"Template path can't be empty"):
+        key_placer.run(layout_path, key_info, diode_info, True)
+
+
+def test_placer_diode_from_illegal_preset(tmpdir, request) -> None:
+    template_path = f"{tmpdir}/template.kicad_pcb"
+    board = get_board_for_2x2_example(request)
+    key_placer = KeyPlacer(board)
+    key_info = ElementInfo("SW{}", PositionOption.DEFAULT, ZERO_POSITION, "")
+    diode_info = ElementInfo("D{}", PositionOption.PRESET, None, template_path)
+    layout_path = get_2x2_layout_path(request)
+
+    template, _, _ = get_board_with_one_switch(request, "SW_Cherry_MX_PCB_1.00u")
+    # having two switches in template file makes it illegal:
+    add_switch_footprint(template, request, 2)
+
+    template.Save(template_path)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"Template file '.*' must have exactly one switch. "
+            "Found 2 switches using 'SW{}' annotation format."
+        ),
+    ):
+        key_placer.run(layout_path, key_info, diode_info, True)
+
+    save_and_render(board, tmpdir, request)

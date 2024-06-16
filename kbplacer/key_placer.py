@@ -124,6 +124,9 @@ class KeyMatrix:
     def switches_by_number(self) -> Iterable[Tuple[int, pcbnew.FOOTPRINT]]:
         return self._switches_by_number.items()
 
+    def number_of_switches(self) -> int:
+        return len(self._switches)
+
     def switch_by_reference(self, reference: str) -> pcbnew.FOOTPRINT:
         return self._switches[reference]
 
@@ -245,7 +248,7 @@ class MatrixAnnotatedKeyboardSwitchIterator:
             )
         switches = sorted(switches)
         logger.debug(f"Got {switches} for {matrix_coordinates} position")
-        # assume thar alternative keys have same annotation with
+        # assume that alternative keys have same annotation with
         # some sort of suffix so after sorting
         # the option index would get us correct footprint
         try:
@@ -256,7 +259,7 @@ class MatrixAnnotatedKeyboardSwitchIterator:
             self._seen.append(matrix_coordinates)
             return fp
         except Exception:
-            logger.warning("Could not locate footprint")
+            logger.warning("Could not find alternative layout footprint")
             return None
 
     def __next__(self):
@@ -785,13 +788,16 @@ class KeyPlacer(BoardModifier):
             template_matrix = KeyMatrix(
                 source, key_matrix.key_format, diode_info.annotation_format
             )
+            number_of_template_switches = template_matrix.number_of_switches()
             if (
                 diode_info.position_option == PositionOption.PRESET
-                and len(template_matrix._switches) != 1
+                and number_of_template_switches != 1
             ):
                 msg = (
                     f"Template file '{diode_info.template_path}' "
-                    "must have exactly one switch"
+                    "must have exactly one switch. "
+                    f"Found {number_of_template_switches} switches using "
+                    f"'{key_matrix.key_format}' annotation format."
                 )
                 raise RuntimeError(msg)
             first_switch = template_matrix.first_switch_number()
@@ -858,6 +864,15 @@ class KeyPlacer(BoardModifier):
                 f"The '{diode_info.position_option}' position not supported for "
                 f"multiple diodes per switch layouts, use '{PositionOption.RELATIVE}' "
                 f"or '{PositionOption.PRESET}' position option"
+            )
+            raise RuntimeError(msg)
+
+        number_of_switches = key_matrix.number_of_switches()
+        if number_of_switches == 0:
+            msg = (
+                f"No switch footprints found using '{key_info.annotation_format}' "
+                "annotation format. Make sure that switches are added to opened "
+                "PCB file and theirs annotations match configured value."
             )
             raise RuntimeError(msg)
 

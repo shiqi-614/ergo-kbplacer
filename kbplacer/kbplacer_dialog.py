@@ -153,7 +153,7 @@ class FloatValidator(wx.Validator):
             # this can happen when value is empty, equal '-', '.', or '-.',
             # other invalid values should not be allowed by 'OnChar' filtering
             name = text_ctrl.GetName()
-            wx.MessageBox(f"Invalid '{name}' float value: '{text}'!", "Error")
+            wx.MessageBox(f"Invalid '{name}' value: '{text}' is not a number!", "Error")
             text_ctrl.SetFocus()
             return False
 
@@ -174,6 +174,7 @@ class FloatValidator(wx.Validator):
             wx.WXK_RIGHT,
             wx.WXK_NUMPAD_LEFT,
             wx.WXK_NUMPAD_RIGHT,
+            wx.WXK_TAB,
         ]:
             event.Skip()
         else:
@@ -630,10 +631,6 @@ class KbplacerDialog(wx.Dialog):
             "SW{}", PositionOption.DEFAULT, ZERO_POSITION, ""
         ),
     ) -> wx.Sizer:
-        key_annotation = LabeledTextCtrl(
-            self, wx_("Footprint Annotation") + ":", element_info.annotation_format
-        )
-
         layout_label = wx.StaticText(self, -1, self._("Keyboard layout file:"))
         layout_picker = get_file_picker(
             self,
@@ -659,6 +656,10 @@ class KbplacerDialog(wx.Dialog):
             value=str(key_distance[1]),
             width=5,
             validator=FloatValidator(),
+        )
+
+        key_annotation = LabeledTextCtrl(
+            self, wx_("Footprint Annotation") + ":", element_info.annotation_format
         )
 
         key_position = ElementPositionWidget(self, ZERO_POSITION, disable_offsets=True)
@@ -994,26 +995,32 @@ if __name__ == "__main__":
 
     initial_state = load_window_state_from_log(args.initial_state_file)
     if not args.run_without_dialog:
-        _ = wx.App()
+        app = wx.App()
         dlg = KbplacerDialog(None, "kbplacer", initial_state=initial_state)
-        with open(f"{args.output_dir}/window_state.json", "w") as f:
-            f.write(f"{dlg.get_window_state()}")
 
         if "PYTEST_CURRENT_TEST" in os.environ:
+            print(f"Using {wx.version()}")
+
             # use stdin for gracefully closing GUI when running
             # from pytest. This is required when measuring
             # coverage and process kill would cause measurement to be lost
-            def listen_for_exit():
-                while True:
-                    input("Press any key to exit: ")
-                    dlg.Close(True)
-                    sys.exit()
+            def listen_for_exit() -> None:
+                input("Press any key to exit: ")
+                dlg.Close()
+                wx.Exit()
 
             input_thread = threading.Thread(target=listen_for_exit)
-            input_thread.daemon = True
             input_thread.start()
 
-        dlg.ShowModal()
+            dlg.Show()
+            app.MainLoop()
+        else:
+            dlg.ShowModal()
+
+        with open(f"{args.output_dir}/window_state.json", "w") as f:
+            f.write(f"{dlg.get_window_state()}")
+
+        print("exit ok")
     else:
         import pcbnew
 

@@ -6,6 +6,7 @@ from typing import List
 
 import pcbnew
 
+from . import __version__
 from .defaults import DEFAULT_DIODE_POSITION, ZERO_POSITION
 from .element_position import ElementInfo, ElementPosition, PositionOption, Side
 from .kbplacer_plugin import PluginSettings, run
@@ -164,6 +165,7 @@ def app() -> None:
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
+    parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument(
         "-b",
         "--board",
@@ -301,6 +303,14 @@ def app() -> None:
             "`--create-from-annotated-layout` option used."
         ),
     )
+    parser.add_argument(
+        "--log-level",
+        required=False,
+        default="WARNING",
+        choices=logging._nameToLevel.keys(),
+        type=str,
+        help="Provide logging level, default=%(default)s",
+    )
 
     args = parser.parse_args()
 
@@ -309,7 +319,7 @@ def app() -> None:
 
     # set up logger
     logging.basicConfig(
-        level=logging.DEBUG, format="%(asctime)s: %(message)s", datefmt="%H:%M:%S"
+        level=args.log_level, format="%(asctime)s: %(message)s", datefmt="%H:%M:%S"
     )
 
     if args.create_from_annotated_layout and os.path.isfile(board_path):

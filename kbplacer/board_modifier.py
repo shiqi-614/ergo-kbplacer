@@ -60,22 +60,23 @@ def position_in_cartesian_coordinates(
 
 
 def get_footprint(board: pcbnew.BOARD, reference: str) -> pcbnew.FOOTPRINT:
-    logger.info(f"Searching for {reference} footprint in {board.GetFileName()}")
+    logger.debug(f"Searching for {reference} footprint in {board.GetFileName()}")
     footprint = board.FindFootprintByReference(reference)
     if footprint is None:
-        logger.error("Footprint not found")
         msg = f"Cannot find footprint {reference}"
-        raise Exception(msg)
+        raise RuntimeError(msg)
     return footprint
 
 
 def get_optional_footprint(
     board: pcbnew.BOARD, reference: str
 ) -> pcbnew.FOOTPRINT | None:
-    try:
-        footprint = get_footprint(board, reference)
-    except Exception as _:
-        footprint = None
+    logger.debug(
+        f"Searching for optional {reference} footprint in {board.GetFileName()}"
+    )
+    footprint = board.FindFootprintByReference(reference)
+    if footprint is None:
+        logger.debug("Footprint not found")
     return footprint
 
 
@@ -367,7 +368,7 @@ class BoardModifier:
             logger.info("Track added")
             return stop
         else:
-            logger.warning("Could not add track segment due to detected collision")
+            logger.debug("Could not add track segment due to detected collision")
             return None
 
     def add_track_segment_by_points(

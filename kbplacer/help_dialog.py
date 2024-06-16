@@ -1,8 +1,9 @@
 import os
-import re
 import webbrowser
 
 import wx
+
+from . import __version__
 
 wx_ = wx.GetTranslation
 
@@ -43,16 +44,7 @@ class HelpDialog(wx.Dialog):
         name = wx.StaticText(self, -1, "Keyboard Footprints Placer")
         name.SetFont(font)
 
-        version_file_name = os.path.join(source_dir, "version.txt")
-        version_str = self._("<missing>")
-        if os.path.isfile(version_file_name):
-            with open(version_file_name, "r") as f:
-                version_str = f.read()
-        if not re.match(r"\d.\d$", version_str):
-            status = ", " + self._("development build")
-        else:
-            status = ""
-        version = wx.StaticText(self, -1, wx_("Version") + f": {version_str}{status}")
+        version = wx.StaticText(self, -1, wx_("Version") + f": {__version__}")
 
         name_box = wx.BoxSizer(wx.HORIZONTAL)
         name_box.Add(static_icon_bitmap, 0, wx.ALL, 5)
@@ -162,10 +154,9 @@ class HelpDialog(wx.Dialog):
 
 
 if __name__ == "__main__":
-    import sys
     import threading
 
-    _ = wx.App(False)
+    app = wx.App()
     dlg = HelpDialog(None)
 
     if "PYTEST_CURRENT_TEST" in os.environ:
@@ -173,13 +164,16 @@ if __name__ == "__main__":
         # from pytest. This is required when measuring
         # coverage and process kill would cause measurement to be lost
         def listen_for_exit():
-            while True:
-                input("Press any key to exit: ")
-                dlg.Close(wx.ID_CANCEL)
-                sys.exit()
+            input("Press any key to exit: ")
+            dlg.Close()
+            wx.Exit()
 
         input_thread = threading.Thread(target=listen_for_exit)
-        input_thread.daemon = True
         input_thread.start()
 
-    dlg.ShowModal()
+        dlg.Show()
+        app.MainLoop()
+    else:
+        dlg.ShowModal()
+
+    print("exit ok")

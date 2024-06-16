@@ -14,19 +14,16 @@ from typing import Tuple
 import pytest
 import yaml
 
-from .conftest import equal_ignore_order
+from kbplacer.kle_serial import (
+    Keyboard,
+    MatrixAnnotatedKeyboard,
+    get_keyboard_from_file,
+    parse_ergogen_points,
+    parse_kle,
+    parse_via,
+)
 
-try:
-    from kbplacer.kle_serial import (
-        Keyboard,
-        MatrixAnnotatedKeyboard,
-        get_keyboard_from_file,
-        parse_ergogen_points,
-        parse_kle,
-        parse_via,
-    )
-except Exception:
-    pass
+from .conftest import equal_ignore_order
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +60,45 @@ def test_labels(layout, expected) -> None:
     assert result.keys[0].labels == expected
     # check if reverse operation works as well:
     assert [json.loads(result.to_kle())] == layout
+
+
+@pytest.mark.parametrize(
+    # fmt: off
+    "layout,expected",
+    [
+        ([["1,2"]], ("1", "2")),
+        ([["1, 2"]], ("1", "2")),
+        ([[" 1, 2"]], ("1", "2")),
+        ([["R1, R2"]], ("R1", "R2")),
+        ([["R1,R2 "]], ("R1", "R2")),
+    ],
+    # fmt: on
+)
+def test_via_labels(layout, expected) -> None:
+    keyboard = parse_kle(layout)
+    annotated_keyboard = MatrixAnnotatedKeyboard(keyboard.meta, keyboard.keys)
+    assert (
+        MatrixAnnotatedKeyboard.get_matrix_position(annotated_keyboard.keys[0])
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    # fmt: off
+    "layout",
+    [
+        ([["1-2"]]),
+        ([["1,2,3"]]),
+    ],
+    # fmt: on
+)
+def test_illegal_via_labels(layout) -> None:
+    with pytest.raises(
+        RuntimeError, match=r"Matrix coordinates label missing or invalid"
+    ):
+        keyboard = parse_kle(layout)
+        annotated_keyboard = MatrixAnnotatedKeyboard(keyboard.meta, keyboard.keys)
+        MatrixAnnotatedKeyboard.get_matrix_position(annotated_keyboard.keys[0])
 
 
 class LabelsTestCase(unittest.TestCase):
@@ -334,6 +370,28 @@ def test_bottom_row_decal_handling() -> None:
     assert len(result.alternative_keys) == 1
 
 
+def test_collapse_ignores_decal_keys_in_default_key_group() -> None:
+    # same as `test_bottom_row_decal_handling` but with decal key
+    # with missing labels in default row. Its labels should be ignored and it should
+    # be propagated to collapsed layout without change
+    # fmt: off
+    layout = [
+        [{"w":1.5},"4,0\n\n\n0,0","4,1\n\n\n0,0",{"w":1.5},"4,2\n\n\n0,0",{"d":True},""],
+        [{"y":0.75,"w":1.5,"d":True},"\n\n\n0,1",{"w":2.5},"4,1\n\n\n0,1"]
+    ]
+    expected = [
+        [{"w":1.5},"4,0\n\n\n0,0","4,1\n\n\n0,0",{"x":-1,"w":2.5},"4,1\n\n\n0,1",{"x":-1.5,"w":1.5},"4,2\n\n\n0,0",{"d":True},""]
+    ]
+    # fmt: on
+    result = _layout_collapse(layout)
+    expected_keyboard = parse_kle(expected)
+    expected_keyboard = MatrixAnnotatedKeyboard(
+        meta=expected_keyboard.meta, keys=expected_keyboard.keys
+    )
+    assert result == expected_keyboard
+    assert len(result.alternative_keys) == 1
+
+
 def test_collapse_detects_duplicated_keys() -> None:
     # middle alternative key should be removed because it belongs to the same net,
     # and although it is different size than default choice, the center of a switch
@@ -384,7 +442,7 @@ class TestKleSerialCli:
         package_path,
         package_name,
         args: dict[str, str] = {},
-    ) -> None:
+    ) -> subprocess.Popen:
         kbplacer_args = [
             "python3",
             "-m",
@@ -398,12 +456,14 @@ class TestKleSerialCli:
         env = os.environ.copy()
         p = subprocess.Popen(
             kbplacer_args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            text=True,
             cwd=package_path,
             env=env,
         )
-        p.communicate()
-        if p.returncode != 0:
-            raise Exception("kle_serial __main__ failed")
+        return p
 
     @pytest.fixture()
     def example_isolation(self, request, tmpdir, example) -> Tuple[str, str]:
@@ -429,7 +489,7 @@ class TestKleSerialCli:
         with open(internal, "r") as f:
             internal_json = json.load(f)
 
-        self._run_subprocess(
+        p = self._run_subprocess(
             package_path,
             package_name,
             {
@@ -440,10 +500,13 @@ class TestKleSerialCli:
                 "-text": "",
             },
         )
+        p.communicate()
+        assert p.returncode == 0
+
         with open(internal_tmp, "r") as f:
             assert json.load(f) == internal_json
 
-        self._run_subprocess(
+        p = self._run_subprocess(
             package_path,
             package_name,
             {
@@ -454,8 +517,50 @@ class TestKleSerialCli:
                 "-text": "",
             },
         )
+        p.communicate()
+        assert p.returncode == 0
+
         with open(raw_tmp, "r") as f:
             assert json.load(f) == raw_json
+
+    @pytest.mark.parametrize(
+        "example",
+        ["0_sixty", "wt60_a", "wt60_d"],
+    )
+    @pytest.mark.parametrize("outform", ["KLE_INTERNAL", "KLE_RAW"])
+    def test_via_file_convert(
+        self, request, tmpdir, package_path, package_name, example, outform
+    ) -> None:
+        test_dir = request.fspath.dirname
+        data_dir = f"{test_dir}/data"
+
+        layout_file = f"{data_dir}/via-layouts/{example}.json"
+        layout_in = f"{tmpdir}/{example}.json"
+        shutil.copy(layout_file, layout_in)
+        tmp_file = Path(layout_in).with_suffix(".json.tmp")
+
+        args = {
+            "-in": layout_in,
+            "-inform": "KLE_VIA",
+            "-out": str(tmp_file),
+            "-outform": outform,
+            "-text": "",
+        }
+        p = self._run_subprocess(package_path, package_name, args)
+        p.communicate()
+        assert p.returncode == 0
+
+        with open(Path(data_dir) / f"via-layouts/{example}-internal.json", "r") as f:
+            reference = json.load(f)
+
+        if outform == "KLE_RAW":
+            keyboard = Keyboard.from_json(reference)
+            result = keyboard.to_kle()
+            result = "[" + result + "]"
+            reference = json.loads(result)
+
+        with open(tmp_file, "r") as f:
+            assert json.load(f) == reference
 
     @pytest.mark.parametrize(
         "example,ergogen_filter",
@@ -487,7 +592,9 @@ class TestKleSerialCli:
         }
         if ergogen_filter:
             args["-ergogen-filter"] = ergogen_filter
-        self._run_subprocess(package_path, package_name, args)
+        p = self._run_subprocess(package_path, package_name, args)
+        p.communicate()
+        assert p.returncode == 0
 
         with open(f"{data_dir}/ergogen-layouts/{example}-reference.json", "r") as f:
             reference = json.load(f)
@@ -511,13 +618,34 @@ class TestKleSerialCli:
             "-outform": "KLE_RAW",
             "-text": "",
         }
-        self._run_subprocess(package_path, package_name, args)
+        p = self._run_subprocess(package_path, package_name, args)
+        p.communicate()
+        assert p.returncode == 0
 
         with open(f"{data_dir}/ergogen-layouts/{example}-reference.json", "r") as f:
             reference = json.load(f)
 
         with open(tmp_file, "r") as f:
             assert json.load(f) == reference
+
+    @pytest.mark.parametrize("form", ["KLE_RAW", "KLE_INTERNAL"])
+    def test_convertion_not_needed(
+        self, package_path, package_name, tmpdir, form
+    ) -> None:
+        p = self._run_subprocess(
+            package_path,
+            package_name,
+            {
+                "-in": f"{tmpdir}/in.json",
+                "-inform": form,
+                "-out": f"{tmpdir}/out.json",
+                "-outform": form,
+                "-text": "",
+            },
+        )
+        outs, _ = p.communicate()
+        assert p.returncode == 1
+        assert outs == "Output format equal input format, nothing to do...\n"
 
 
 def test_utf8_label(request) -> None:

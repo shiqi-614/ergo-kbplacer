@@ -5,6 +5,15 @@ from typing import List, Tuple, cast
 import pcbnew
 import pytest
 
+from kbplacer.board_modifier import (
+    BoardModifier,
+    get_footprint,
+    get_optional_footprint,
+    set_position_by_points,
+    set_side,
+)
+from kbplacer.element_position import Side
+
 from .conftest import (
     KICAD_VERSION,
     add_track,
@@ -13,17 +22,6 @@ from .conftest import (
     pointMM,
     update_netinfo,
 )
-
-try:
-    from kbplacer.board_modifier import (
-        BoardModifier,
-        set_position_by_points,
-        set_side,
-    )
-    from kbplacer.element_position import Side
-except Exception:
-    pass
-
 
 logger = logging.getLogger(__name__)
 
@@ -241,3 +239,14 @@ def test_track_with_track_collision(
 
     save_and_render(board, tmpdir, request)
     assert collide == expected, "Unexpected track collision result"
+
+
+def test_find_footprint_raises_when_not_found() -> None:
+    board = pcbnew.CreateEmptyBoard()
+    with pytest.raises(RuntimeError, match=r"Cannot find footprint SW1"):
+        get_footprint(board, "SW1")
+
+
+def test_find_optional_footprint_return_none_when_not_found() -> None:
+    board = pcbnew.CreateEmptyBoard()
+    assert get_optional_footprint(board, "SW1") is None
